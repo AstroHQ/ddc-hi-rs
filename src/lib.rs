@@ -21,27 +21,39 @@
 //! }
 //! ```
 
-extern crate ddc;
-extern crate edid;
-extern crate mccs;
-extern crate mccs_caps;
-extern crate mccs_db;
-extern crate failure;
-#[macro_use]
-extern crate log;
-#[cfg(feature = "ddc-i2c")]
-extern crate ddc_i2c;
-#[cfg(feature = "has-ddc-winapi")]
-extern crate ddc_winapi;
-#[cfg(feature = "has-nvapi")]
-extern crate nvapi;
-
-use std::{io, fmt, str};
 use std::iter::FromIterator;
-use failure::Error;
-use ddc::Edid;
+use std::{fmt, io, str};
 
-pub use ddc::{Ddc, DdcTable, DdcHost, FeatureCode, VcpValue, VcpValueType, TimingMessage};
+use ddc::Edid;
+use log::trace;
+use thiserror::Error;
+
+pub use ddc::{Ddc, DdcHost, DdcTable, FeatureCode, TimingMessage, VcpValue, VcpValueType};
+
+/// The error type for high level DDC/CI monitor operations.
+#[derive(Debug, Error)]
+pub enum Error {
+    /// I/O error.
+    #[error(transparent)]
+    IoError(#[from] io::Error),
+
+    #[cfg(feature = "has-ddc-winapi")]
+    /// An error from the Win32 API.
+    #[error("win32 error: {0}")]
+    WinApiError(#[from] ddc_winapi::WinError),
+
+    // NOTE: We use ddc-i2c instead of has-... because the latter actually means
+    // ddc-i2c enabled on a Unix platform.
+    #[cfg(all(feature = "ddc-i2c", feature = "has-nvapi"))]
+    /// An error occurred during DDC/CI communications.
+    #[error("i2c error: {0}")]
+    I2CError(#[from] ddc_i2c::Error<nvapi::Status>),
+
+    #[cfg(feature = "has-nvapi")]
+    /// An error occurred during DC/CI communications.|
+    #[error("nvapi error: {0}")]
+    NvapiError(#[from] nvapi::Status),
+}
 
 /// Identifying information about an attached display.
 ///
@@ -82,8 +94,8 @@ impl DisplayInfo {
     /// Create an empty `DisplayInfo`.
     pub fn new(backend: Backend, id: String) -> Self {
         DisplayInfo {
-            backend: backend,
-            id: id,
+            backend,
+            id,
             manufacturer_id: None,
             model_id: None,
             version: None,
@@ -104,7 +116,8 @@ impl DisplayInfo {
     pub fn from_edid(backend: Backend, id: String, edid_data: Vec<u8>) -> io::Result<Self> {
         trace!("DisplayInfo::from_edid({:?}, {})", backend, id);
 
-        let edid = edid::parse(&edid_data).to_result()
+        let edid = edid::parse(&edid_data)
+            .to_result()
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
 
         let mut model_name = None;
@@ -119,8 +132,8 @@ impl DisplayInfo {
         }
 
         Ok(DisplayInfo {
-            backend: backend,
-            id: id,
+            backend,
+            id,
             edid_data: Some(edid_data),
             manufacturer_id: Some(String::from_iter(edid.header.vendor.iter())),
             model_id: Some(edid.header.product),
@@ -147,8 +160,8 @@ impl DisplayInfo {
         };
 
         let mut res = DisplayInfo {
-            backend: backend,
-            id: id,
+            backend,
+            id,
             model_name: caps.model.clone(),
             mccs_version: caps.mccs_version.clone(),
             edid_data: caps.edid.clone(),
@@ -195,7 +208,7 @@ impl DisplayInfo {
         }
 
         if self.manufacture_year.is_none() {
-            self.manufacture_year  = info.manufacture_year.clone()
+            self.manufacture_year = info.manufacture_year.clone()
         }
 
         if self.manufacture_week.is_none() {
@@ -298,11 +311,15 @@ pub enum Backend {
 
 impl fmt::Display for Backend {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}", match *self {
-            Backend::I2cDevice => "i2c-dev",
-            Backend::WinApi => "winapi",
-            Backend::Nvapi => "nvapi",
-        })
+        write!(
+            f,
+            "{}",
+            match *self {
+                Backend::I2cDevice => "i2c-dev",
+                Backend::WinApi => "winapi",
+                Backend::Nvapi => "nvapi",
+            }
+        )
     }
 }
 
@@ -348,8 +365,8 @@ impl Display {
     /// Create a new display from the specified handle.
     pub fn new(handle: Handle, info: DisplayInfo) -> Self {
         Display {
-            handle: handle,
-            info: info,
+            handle,
+            info,
             filled_caps: false,
         }
     }
@@ -363,17 +380,20 @@ impl Display {
             use std::os::unix::fs::MetadataExt;
 
             if let Ok(devs) = ddc_i2c::I2cDeviceEnumerator::new() {
-                displays.extend(devs
-                    .map(|mut ddc| -> Result<_, Error> {
+                displays.extend(
+                    devs.map(|mut ddc| -> Result<_, Error> {
                         let mut edid = vec![0u8; 0x100];
                         ddc.read_edid(0, &mut edid)?;
-                        let id = ddc.inner_ref().inner_ref().metadata().map(|meta| meta.rdev().to_string()).unwrap_or(Default::default());
+                        let id = ddc
+                            .inner_ref()
+                            .inner_ref()
+                            .metadata()
+                            .map(|meta| meta.rdev().to_string())
+                            .unwrap_or(Default::default());
                         let info = DisplayInfo::from_edid(Backend::I2cDevice, id, edid)?;
-                        Ok(Display::new(
-                            Handle::I2cDevice(ddc),
-                            info,
-                        ))
-                    }).filter_map(|d| d.ok())
+                        Ok(Display::new(Handle::I2cDevice(ddc), info))
+                    })
+                    .filter_map(|d| d.ok()),
                 )
             }
         }
@@ -381,15 +401,10 @@ impl Display {
         #[cfg(feature = "has-ddc-winapi")]
         {
             if let Ok(devs) = ddc_winapi::Monitor::enumerate() {
-                displays.extend(devs.into_iter()
-                    .map(|ddc| {
-                        let info = DisplayInfo::new(Backend::WinApi, ddc.description());
-                        Display::new(
-                            Handle::WinApi(ddc),
-                            info,
-                        )
-                    })
-                )
+                displays.extend(devs.into_iter().map(|ddc| {
+                    let info = DisplayInfo::new(Backend::WinApi, ddc.description());
+                    Display::new(Handle::WinApi(ddc), info)
+                }))
             }
         }
 
@@ -402,7 +417,9 @@ impl Display {
                     for gpu in gpus {
                         let gpu = Rc::new(gpu);
                         let id_prefix = gpu.short_name().unwrap_or("NVAPI".into());
-                        if let Ok(ids) = gpu.display_ids_connected(nvapi::ConnectedIdsFlags::empty()) {
+                        if let Ok(ids) =
+                            gpu.display_ids_connected(nvapi::ConnectedIdsFlags::empty())
+                        {
                             for id in ids {
                                 let mut i2c = nvapi::I2c::new(gpu.clone(), id.display_id); // TODO: it says mask, is it actually `1<<display_id` instead?
                                 i2c.set_port(None, true); // TODO: port=Some(1) instead? docs seem to indicate it's not optional, but the one example I can find keeps it unset so...
@@ -413,16 +430,18 @@ impl Display {
 
                                 let mut ddc = ddc_i2c::I2cDdc::new(i2c);
 
-                                let id = format!("{}/{}:{:?}", id_prefix, id.display_id, id.connector);
+                                let id =
+                                    format!("{}/{}:{:?}", id_prefix, id.display_id, id.connector);
                                 let mut edid = vec![0u8; 0x80]; // 0x100
-                                if let Ok(ddc) = ddc.read_edid(0, &mut edid)
-                                    .map_err(Error::from)
-                                    .and_then(|_| DisplayInfo::from_edid(Backend::Nvapi, id, edid)
-                                        .map_err(Error::from)
-                                    ).map(|info| Display::new(
-                                        Handle::Nvapi(ddc),
-                                        info,
-                                    )) {
+                                if let Ok(ddc) = ddc
+                                    .read_edid(0, &mut edid)
+                                    .map_err(From::from)
+                                    .and_then(|_| {
+                                        DisplayInfo::from_edid(Backend::Nvapi, id, edid)
+                                            .map_err(Error::from)
+                                    })
+                                    .map(|info| Display::new(Handle::Nvapi(ddc), info))
+                                {
                                     displays.push(ddc);
                                 }
                             }
@@ -441,10 +460,7 @@ impl Display {
         if !self.filled_caps {
             let (backend, id) = (self.info.backend, self.info.id.clone());
             let caps = self.handle.capabilities()?;
-            let info = DisplayInfo::from_capabilities(
-                backend, id,
-                &caps,
-            );
+            let info = DisplayInfo::from_capabilities(backend, id, &caps);
             if info.mccs_version.is_some() {
                 self.info.mccs_database = Default::default();
             }
@@ -476,8 +492,7 @@ pub enum Handle {
 impl Handle {
     /// Request and parse the display's capabilities string.
     pub fn capabilities(&mut self) -> Result<mccs::Capabilities, Error> {
-        mccs_caps::parse_capabilities(&self.capabilities_string()?)
-            .map_err(From::from)
+        mccs_caps::parse_capabilities(&self.capabilities_string()?).map_err(From::from)
     }
 }
 
@@ -524,7 +539,9 @@ impl Ddc for Handle {
             #[cfg(feature = "has-ddc-i2c")]
             Handle::I2cDevice(ref mut i2c) => i2c.set_vcp_feature(code, value).map_err(From::from),
             #[cfg(feature = "has-ddc-winapi")]
-            Handle::WinApi(ref mut monitor) => monitor.set_vcp_feature(code, value).map_err(From::from),
+            Handle::WinApi(ref mut monitor) => {
+                monitor.set_vcp_feature(code, value).map_err(From::from)
+            }
             #[cfg(feature = "has-nvapi")]
             Handle::Nvapi(ref mut i2c) => i2c.set_vcp_feature(code, value).map_err(From::from),
         }
@@ -559,20 +576,33 @@ impl DdcTable for Handle {
             #[cfg(feature = "has-ddc-i2c")]
             Handle::I2cDevice(ref mut i2c) => i2c.table_read(code).map_err(From::from),
             #[cfg(feature = "has-ddc-winapi")]
-            Handle::WinApi(_) =>
-                Err(io::Error::new(io::ErrorKind::Other, "winapi does not support DDC tables").into()),
+            Handle::WinApi(_) => Err(io::Error::new(
+                io::ErrorKind::Other,
+                "winapi does not support DDC tables",
+            )
+            .into()),
             #[cfg(feature = "has-nvapi")]
             Handle::Nvapi(ref mut i2c) => i2c.table_read(code).map_err(From::from),
         }
     }
 
-    fn table_write(&mut self, code: FeatureCode, offset: u16, value: &[u8]) -> Result<(), Self::Error> {
+    fn table_write(
+        &mut self,
+        code: FeatureCode,
+        offset: u16,
+        value: &[u8],
+    ) -> Result<(), Self::Error> {
         match *self {
             #[cfg(feature = "has-ddc-i2c")]
-            Handle::I2cDevice(ref mut i2c) => i2c.table_write(code, offset, value).map_err(From::from),
+            Handle::I2cDevice(ref mut i2c) => {
+                i2c.table_write(code, offset, value).map_err(From::from)
+            }
             #[cfg(feature = "has-ddc-winapi")]
-            Handle::WinApi(_) =>
-                Err(io::Error::new(io::ErrorKind::Other, "winapi does not support DDC tables").into()),
+            Handle::WinApi(_) => Err(io::Error::new(
+                io::ErrorKind::Other,
+                "winapi does not support DDC tables",
+            )
+            .into()),
             #[cfg(feature = "has-nvapi")]
             Handle::Nvapi(ref mut i2c) => i2c.table_write(code, offset, value).map_err(From::from),
         }

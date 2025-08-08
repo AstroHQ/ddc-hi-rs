@@ -1,6 +1,6 @@
 [package]
 name = "ddc-hi"
-version = "0.5.0"
+version = "0.6.0"
 authors = ["arcnmx"]
 build = "build.rs"
 edition = "2021"
@@ -13,35 +13,40 @@ repository = "https://github.com/arcnmx/ddc-hi-rs"
 readme = "README.md"
 license = "MIT"
 
-include = [
-	"/src/**/*.rs",
-	"/build.rs",
-	"/README*",
-	"/COPYING*",
-]
+include = ["/src/**/*.rs", "/build.rs", "/README*", "/COPYING*"]
 
 [badges]
 maintenance = { status = "passively-maintained" }
 
 [dependencies]
 ddc = "0.2"
-edid = "0.3"
-mccs = "0.1"
-mccs-caps = "0.1"
-mccs-db = "0.1"
+astro-edid = { version = "2", registry = "astropad" }
+mccs = "0.2"
+mccs-caps = "0.2"
+mccs-db = "0.2"
 thiserror = "1"
 log = "0.4"
 
 [target.'cfg(target_os = "linux")'.dependencies]
-ddc-i2c = { version = "0.2", default-features = false, features = ["with-linux", "with-linux-enumerate"], optional = false }
+ddc-i2c = { version = "0.2", default-features = false, features = [
+	"with-linux",
+	"with-linux-enumerate",
+], optional = false }
 
 [target.'cfg(windows)'.dependencies]
 ddc-winapi = { version = "0.2", optional = true }
-nvapi = { version = "0.1", default-features = false, features = ["i2c"], optional = true }
+nvapi = { version = "0.1", default-features = false, features = [
+	"i2c",
+], optional = true }
 ddc-i2c = { version = "0.2", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 ddc-macos = { version = "0.2", optional = true }
 
 [features]
+has-ddc = []
+has-nvapi = []
+has-ddc-winapi = []
+has-ddc-macos = []
+has-ddc-i2c = []
 default = ["ddc-i2c", "ddc-winapi", "nvapi", "ddc-macos"]

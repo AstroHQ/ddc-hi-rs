@@ -25,7 +25,7 @@ pub use ddc::{Ddc, DdcHost, DdcTable, FeatureCode, TimingMessage, VcpValue, VcpV
 use {
     ddc::Edid,
     log::{trace, warn},
-    std::{fmt, io, iter::FromIterator, str},
+    std::{fmt, io, str},
     thiserror::Error,
 };
 
@@ -154,18 +154,19 @@ impl DisplayInfo {
     pub fn from_edid(backend: Backend, id: String, edid_data: Vec<u8>) -> io::Result<Self> {
         trace!("DisplayInfo::from_edid({:?}, {})", backend, id);
 
-        let edid = edid::parse(&edid_data)
-            .to_result()
+        let edid = astro_edid::Edid::parse_from_bytes(&edid_data)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
 
         let mut model_name = None;
         let mut serial_number = None;
 
-        for desc in edid.descriptors {
-            match desc {
-                edid::Descriptor::SerialNumber(serial) => serial_number = Some(serial),
-                edid::Descriptor::ProductName(model) => model_name = Some(model),
-                _ => (),
+        if let Some(descriptors) = &edid.base.descriptors {
+            for desc in descriptors {
+                match desc {
+                    astro_edid::blocks::base::Descriptor::SerialNumber(serial) => serial_number = Some(serial.clone()),
+                    astro_edid::blocks::base::Descriptor::Name(name) => model_name = Some(name.clone()),
+                    _ => (),
+                }
             }
         }
 
@@ -173,12 +174,15 @@ impl DisplayInfo {
             backend,
             id,
             edid_data: Some(edid_data),
-            manufacturer_id: Some(String::from_iter(edid.header.vendor.iter())),
-            model_id: Some(edid.header.product),
-            serial: Some(edid.header.serial),
-            version: Some((edid.header.version, edid.header.revision)),
-            manufacture_year: Some(edid.header.year),
-            manufacture_week: Some(edid.header.week),
+            manufacturer_id: Some(edid.base.manufacturer_id.clone()),
+            model_id: Some(edid.base.manufacturer_product_code.try_into().unwrap_or_default()),
+            serial: Some(edid.base.serial_number.try_into().unwrap_or_default()),
+            version: Some((
+                edid.base.edid_version.version.try_into().unwrap_or_default(),
+                edid.base.edid_version.revision.try_into().unwrap_or_default(),
+            )),
+            manufacture_year: Some(edid.base.manufacture_year.try_into().unwrap_or_default()),
+            manufacture_week: Some(edid.base.manufacture_week.try_into().unwrap_or_default()),
             model_name,
             serial_number,
             mccs_version: None,
@@ -356,12 +360,16 @@ pub enum Backend {
 
 impl fmt::Display for Backend {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}", match *self {
-            Backend::I2cDevice => "i2c-dev",
-            Backend::WinApi => "winapi",
-            Backend::Nvapi => "nvapi",
-            Backend::MacOS => "macos",
-        })
+        write!(
+            f,
+            "{}",
+            match *self {
+                Backend::I2cDevice => "i2c-dev",
+                Backend::WinApi => "winapi",
+                Backend::Nvapi => "nvapi",
+                Backend::MacOS => "macos",
+            }
+        )
     }
 }
 
